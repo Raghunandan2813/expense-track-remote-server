@@ -75,10 +75,19 @@ async def list_expenses(start_date, end_date):  # Changed: added async
         return {"status": "error", "message": f"Error listing expenses: {str(e)}"}
 
 @mcp.tool()
-async def summarize(start_date, end_date, category=None):  # Changed: added async
+async def summarize(
+    start_date: str,
+    end_date: str,
+    category: str | None = None
+):
     '''Summarize expenses by category within an inclusive date range.'''
+
+    import aiosqlite
+
     try:
-        async with aiosqlite.connect(DB_PATH) as c:  # Changed: added async
+        async with aiosqlite.connect(DB_PATH) as c:
+            c.row_factory = aiosqlite.Row
+
             query = """
                 SELECT category, SUM(amount) AS total_amount, COUNT(*) as count
                 FROM expenses
@@ -92,12 +101,27 @@ async def summarize(start_date, end_date, category=None):  # Changed: added asyn
 
             query += " GROUP BY category ORDER BY total_amount DESC"
 
-            cur = await c.execute(query, params)  # Changed: added await
-            cols = [d[0] for d in cur.description]
-            return [dict(zip(cols, r)) for r in await cur.fetchall()]  # Changed: added await
-    except Exception as e:
-        return {"status": "error", "message": f"Error summarizing expenses: {str(e)}"}
+            cur = await c.execute(query, params)
+            rows = await cur.fetchall()
 
+            # ✅ Handle empty result
+            if not rows:
+                return {
+                    "content": ["No expenses found for given filters."]
+                }
+
+            # ✅ Clean readable output
+            return {
+                "content": [
+                    f"{r['category']} → ₹{r['total_amount']} ({r['count']} entries)"
+                    for r in rows
+                ]
+            }
+
+    except Exception as e:
+        return {
+            "content": [f"Error: {str(e)}"]
+        }
 @mcp.resource("expense:///categories", mime_type="application/json")  # Changed: expense:// → expense:///
 def categories():
     try:

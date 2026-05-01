@@ -3,24 +3,27 @@ import os
 import aiosqlite
 import sqlite3
 import json
+import tempfile
 
 # ==============================
-# PATH CONFIG
+# SAFE PATH (WORKS EVERYWHERE)
 # ==============================
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+BASE_DIR = tempfile.gettempdir()  # 🔥 always writable
 DB_PATH = os.path.join(BASE_DIR, "expenses.db")
 CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.json")
 
-print(f"📁 Database path: {DB_PATH}")
+print(f"📁 Using DB path: {DB_PATH}")
 
 # ==============================
 # MCP SERVER
 # ==============================
-server = FastMCP("ExpenseTracker")  # ✅ renamed to server (more stable)
+server = FastMCP("ExpenseTracker")
 
 # ==============================
-# DATABASE INIT (SAFE)
+# DB INIT CONTROL
 # ==============================
+_db_initialized = False
+
 def init_db():
     try:
         os.makedirs(BASE_DIR, exist_ok=True)
@@ -41,8 +44,14 @@ def init_db():
         print("✅ Database initialized")
 
     except Exception as e:
-        print(f"❌ DB Init Error: {e}")
+        print(f"❌ DB INIT ERROR: {e}")
         raise
+
+def ensure_db():
+    global _db_initialized
+    if not _db_initialized:
+        init_db()
+        _db_initialized = True
 
 # ==============================
 # TOOLS
@@ -50,8 +59,10 @@ def init_db():
 
 @server.tool()
 async def add_expense(date: str, amount: float, category: str, subcategory: str = "", note: str = ""):
-    """Add a new expense entry to the database."""
+    """Add a new expense entry."""
     try:
+        ensure_db()
+
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             await db.execute("PRAGMA journal_mode=WAL")
 
@@ -74,8 +85,10 @@ async def add_expense(date: str, amount: float, category: str, subcategory: str 
 
 @server.tool()
 async def list_expenses(start_date: str, end_date: str):
-    """List expense entries within a date range."""
+    """List expenses between two dates."""
     try:
+        ensure_db()
+
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             cursor = await db.execute("""
                 SELECT id, date, amount, category, subcategory, note
@@ -85,7 +98,6 @@ async def list_expenses(start_date: str, end_date: str):
             """, (start_date, end_date))
 
             rows = await cursor.fetchall()
-
             columns = [col[0] for col in cursor.description]
 
             return [dict(zip(columns, row)) for row in rows]
@@ -96,8 +108,10 @@ async def list_expenses(start_date: str, end_date: str):
 
 @server.tool()
 async def summarize(start_date: str, end_date: str, category: str | None = None):
-    """Summarize expenses by category."""
+    """Summarize expenses."""
     try:
+        ensure_db()
+
         async with aiosqlite.connect(DB_PATH, timeout=10) as db:
             db.row_factory = aiosqlite.Row
 
@@ -130,7 +144,6 @@ async def summarize(start_date: str, end_date: str, category: str | None = None)
     except Exception as e:
         return {"content": [f"Error: {str(e)}"]}
 
-
 # ==============================
 # RESOURCE
 # ==============================
@@ -162,14 +175,12 @@ def categories():
     except Exception as e:
         return json.dumps({"error": str(e)})
 
-
 # ==============================
 # RUN SERVER
 # ==============================
 if __name__ == "__main__":
     print("🚀 Starting MCP Expense Tracker Server...")
-
-    init_db()  # ✅ initialize ONLY at runtime
+    ensure_db()
 
     server.run(
         transport="http",

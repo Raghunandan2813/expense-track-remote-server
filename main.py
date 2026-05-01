@@ -1,12 +1,33 @@
+from fastmcp import FastMCP
+import os
+import aiosqlite
+import sqlite3
+import json
+
+# ==============================
+# PATH CONFIG
+# ==============================
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "expenses.db")
+CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.json")
+
+print(f"📁 Database path: {DB_PATH}")
+
+# ==============================
+# MCP SERVER
+# ==============================
+server = FastMCP("ExpenseTracker")  # ✅ renamed to server (more stable)
+
+# ==============================
+# DATABASE INIT (SAFE)
+# ==============================
 def init_db():
     try:
-        import sqlite3
+        os.makedirs(BASE_DIR, exist_ok=True)
 
-        os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
-
-        with sqlite3.connect(DB_PATH) as c:
-            c.execute("PRAGMA journal_mode=WAL")
-            c.execute("""
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("PRAGMA journal_mode=WAL")
+            conn.execute("""
                 CREATE TABLE IF NOT EXISTS expenses(
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     date TEXT NOT NULL,
@@ -17,8 +38,141 @@ def init_db():
                 )
             """)
 
-        print("✅ Database initialized successfully")
+        print("✅ Database initialized")
 
     except Exception as e:
-        print(f"❌ Database initialization error: {e}")
+        print(f"❌ DB Init Error: {e}")
         raise
+
+# ==============================
+# TOOLS
+# ==============================
+
+@server.tool()
+async def add_expense(date: str, amount: float, category: str, subcategory: str = "", note: str = ""):
+    """Add a new expense entry to the database."""
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            await db.execute("PRAGMA journal_mode=WAL")
+
+            cursor = await db.execute(
+                "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?, ?, ?, ?, ?)",
+                (date, amount, category, subcategory, note)
+            )
+
+            await db.commit()
+
+            return {
+                "status": "success",
+                "id": cursor.lastrowid,
+                "message": "Expense added successfully"
+            }
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@server.tool()
+async def list_expenses(start_date: str, end_date: str):
+    """List expense entries within a date range."""
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            cursor = await db.execute("""
+                SELECT id, date, amount, category, subcategory, note
+                FROM expenses
+                WHERE date BETWEEN ? AND ?
+                ORDER BY date DESC, id DESC
+            """, (start_date, end_date))
+
+            rows = await cursor.fetchall()
+
+            columns = [col[0] for col in cursor.description]
+
+            return [dict(zip(columns, row)) for row in rows]
+
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+@server.tool()
+async def summarize(start_date: str, end_date: str, category: str | None = None):
+    """Summarize expenses by category."""
+    try:
+        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
+            db.row_factory = aiosqlite.Row
+
+            query = """
+                SELECT category, SUM(amount) as total, COUNT(*) as count
+                FROM expenses
+                WHERE date BETWEEN ? AND ?
+            """
+            params = [start_date, end_date]
+
+            if category:
+                query += " AND category = ?"
+                params.append(category)
+
+            query += " GROUP BY category ORDER BY total DESC"
+
+            cursor = await db.execute(query, params)
+            rows = await cursor.fetchall()
+
+            if not rows:
+                return {"content": ["No expenses found."]}
+
+            return {
+                "content": [
+                    f"{row['category']} → ₹{row['total']} ({row['count']} entries)"
+                    for row in rows
+                ]
+            }
+
+    except Exception as e:
+        return {"content": [f"Error: {str(e)}"]}
+
+
+# ==============================
+# RESOURCE
+# ==============================
+
+@server.resource("expense:///categories", mime_type="application/json")
+def categories():
+    default_categories = {
+        "categories": [
+            "Food & Dining",
+            "Transportation",
+            "Shopping",
+            "Entertainment",
+            "Bills & Utilities",
+            "Healthcare",
+            "Travel",
+            "Education",
+            "Business",
+            "Other"
+        ]
+    }
+
+    try:
+        if os.path.exists(CATEGORIES_PATH):
+            with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
+                return f.read()
+        else:
+            return json.dumps(default_categories, indent=2)
+
+    except Exception as e:
+        return json.dumps({"error": str(e)})
+
+
+# ==============================
+# RUN SERVER
+# ==============================
+if __name__ == "__main__":
+    print("🚀 Starting MCP Expense Tracker Server...")
+
+    init_db()  # ✅ initialize ONLY at runtime
+
+    server.run(
+        transport="http",
+        host="0.0.0.0",
+        port=8000
+    )

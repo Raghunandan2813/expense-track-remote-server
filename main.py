@@ -100,10 +100,10 @@ mcp = FastMCP("ExpenseTracker")
 # -----------------------
 @mcp.tool()
 async def add_expense(
-    token: str,
-    date: str,
-    amount: float,
-    category: str,
+    token: str = "",
+    date: str = "",
+    amount: float = 0.0,
+    category: str = "",
     subcategory: str = "",
     note: str = ""
 ):
@@ -133,7 +133,7 @@ async def add_expense(
 # LIST EXPENSES
 # -----------------------
 @mcp.tool()
-async def list_expenses(token: str, start_date: str, end_date: str):
+async def list_expenses(start_date: str, end_date: str, token: str = ""):
     """
     List expenses for a specific period.
     Requires a valid secret 'token' for authentication.
@@ -154,7 +154,7 @@ async def list_expenses(token: str, start_date: str, end_date: str):
 # SUMMARY + GRAPH
 # -----------------------
 @mcp.tool()
-async def summarize(token: str, start_date: str, end_date: str):
+async def summarize(start_date: str, end_date: str, token: str = ""):
     """
     Get a spending summary and graph.
     Requires a valid secret 'token' for authentication.

@@ -25,8 +25,7 @@ if "/rest/v1" in SUPABASE_URL:
 
 SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-if not SUPABASE_URL or not SUPABASE_KEY:
-    raise Exception("Missing Supabase environment variables")
+
 
 # -----------------------
 # USER AUTH CONFIG
@@ -48,7 +47,11 @@ def get_user_id(token: str) -> str:
 
 # Helper for direct HTTP calls (more robust than the library in some environments)
 async def supabase_request(method: str, table: str, params: dict = None, data: dict = None):
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        raise Exception("Configuration Error: Missing SUPABASE_URL or SUPABASE_KEY environment variables.")
+        
     url = f"{SUPABASE_URL}/rest/v1/{table}"
+
     headers = {
         "apikey": SUPABASE_KEY,
         "Authorization": f"Bearer {SUPABASE_KEY}",

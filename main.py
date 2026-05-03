@@ -255,5 +255,8 @@ def categories():
 # RUN SERVER
 # -----------------------
 if __name__ == "__main__":
-    # Use SSE transport to avoid stdout pollution and for better browser inspector support
-    mcp.run(transport="sse")
+    import os
+    # Render and other cloud hosts provide a PORT environment variable
+    port = int(os.getenv("PORT", 8000))
+    # Use host="0.0.0.0" so the server is accessible from the internet
+    mcp.run(transport="sse", host="0.0.0.0", port=port)

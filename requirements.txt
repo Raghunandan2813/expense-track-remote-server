@@ -1,2 +1,5 @@
 fastmcp
-aiosqlite
+supabase==2.25.1
+python-dotenv
+matplotlib
+httpx

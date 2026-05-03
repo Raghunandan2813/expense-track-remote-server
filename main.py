@@ -1,189 +1,242 @@
 from fastmcp import FastMCP
+import mcp.types as types
 import os
-import aiosqlite
-import sqlite3
+import io
+import base64
+from dotenv import load_dotenv
+import httpx
 import json
-import tempfile
 
-# ==============================
-# SAFE PATH (WORKS EVERYWHERE)
-# ==============================
-BASE_DIR = tempfile.gettempdir()  # 🔥 always writable
-DB_PATH = os.path.join(BASE_DIR, "expenses.db")
-CATEGORIES_PATH = os.path.join(BASE_DIR, "categories.json")
+# Load environment variables from .env file
+load_dotenv()
 
-print(f"📁 Using DB path: {DB_PATH}")
-
-# ==============================
-# MCP SERVER
-# ==============================
-server = FastMCP("ExpenseTracker")
-
-# ==============================
-# DB INIT CONTROL
-# ==============================
-_db_initialized = False
-
-def init_db():
-    try:
-        os.makedirs(BASE_DIR, exist_ok=True)
-
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS expenses(
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    date TEXT NOT NULL,
-                    amount REAL NOT NULL,
-                    category TEXT NOT NULL,
-                    subcategory TEXT DEFAULT '',
-                    note TEXT DEFAULT ''
-                )
-            """)
-
-        print("✅ Database initialized")
-
-    except Exception as e:
-        print(f"❌ DB INIT ERROR: {e}")
-        raise
-
-def ensure_db():
-    global _db_initialized
-    if not _db_initialized:
-        init_db()
-        _db_initialized = True
-
-# ==============================
-# TOOLS
-# ==============================
-
-@server.tool()
-async def add_expense(date: str, amount: float, category: str, subcategory: str = "", note: str = ""):
-    """Add a new expense entry."""
-    try:
-        ensure_db()
-
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            await db.execute("PRAGMA journal_mode=WAL")
-
-            cursor = await db.execute(
-                "INSERT INTO expenses(date, amount, category, subcategory, note) VALUES (?, ?, ?, ?, ?)",
-                (date, amount, category, subcategory, note)
-            )
-
-            await db.commit()
-
-            return {
-                "status": "success",
-                "id": cursor.lastrowid,
-                "message": "Expense added successfully"
-            }
-
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
 
 
-@server.tool()
-async def list_expenses(start_date: str, end_date: str):
-    """List expenses between two dates."""
-    try:
-        ensure_db()
+# -----------------------
+# SUPABASE CONFIG
+# -----------------------
+SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
+# Ensure the URL is just the base (e.g., https://xyz.supabase.co)
+if "/rest/v1" in SUPABASE_URL:
+    SUPABASE_URL = SUPABASE_URL.split("/rest/v1")[0]
 
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            cursor = await db.execute("""
-                SELECT id, date, amount, category, subcategory, note
-                FROM expenses
-                WHERE date BETWEEN ? AND ?
-                ORDER BY date DESC, id DESC
-            """, (start_date, end_date))
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
-            rows = await cursor.fetchall()
-            columns = [col[0] for col in cursor.description]
+if not SUPABASE_URL or not SUPABASE_KEY:
+    raise Exception("Missing Supabase environment variables")
 
-            return [dict(zip(columns, row)) for row in rows]
+# -----------------------
+# USER AUTH CONFIG
+# -----------------------
+# Map of secret tokens to user_ids. 
+# You can add more users here or move this to a database/env file.
+USER_MAP = {
+    "secret-raghu-123": "user_raghu",
+    "secret-friend-456": "user_friend",
+    "test-token": "test_user_01"
+}
 
-    except Exception as e:
-        return {"status": "error", "message": str(e)}
+def get_user_id(token: str) -> str:
+    """Validates the token and returns the corresponding user_id."""
+    user_id = USER_MAP.get(token)
+    if not user_id:
+        raise Exception("Unauthorized: Invalid or missing token.")
+    return user_id
+
+# Helper for direct HTTP calls (more robust than the library in some environments)
+async def supabase_request(method: str, table: str, params: dict = None, data: dict = None):
+    url = f"{SUPABASE_URL}/rest/v1/{table}"
+    headers = {
+        "apikey": SUPABASE_KEY,
+        "Authorization": f"Bearer {SUPABASE_KEY}",
+        "Content-Type": "application/json",
+        "Prefer": "return=representation"
+    }
+    
+    async with httpx.AsyncClient() as client:
+        if method.upper() == "POST":
+            resp = await client.post(url, headers=headers, json=data)
+        elif method.upper() == "GET":
+            resp = await client.get(url, headers=headers, params=params)
+        else:
+            raise ValueError(f"Unsupported method: {method}")
+        
+        if resp.status_code >= 400:
+            try:
+                err_data = resp.json()
+            except:
+                err_data = resp.text
+            raise Exception(f"Supabase Error ({resp.status_code}): {err_data}")
+            
+        return resp.json()
+
+# -----------------------
+# MCP INIT
+# -----------------------
+mcp = FastMCP("ExpenseTracker")
+
+# -----------------------
+# ADD EXPENSE
+# -----------------------
+@mcp.tool()
+async def add_expense(
+    token: str,
+    date: str,
+    amount: float,
+    category: str,
+    subcategory: str = "",
+    note: str = ""
+):
+    """
+    Add a new expense. 
+    Requires a valid secret 'token' for authentication.
+    """
+    user_id = get_user_id(token)
+    
+    data = {
+        "user_id": user_id,
+        "date": date,
+        "amount": amount,
+        "category": category,
+        "subcategory": subcategory,
+        "note": note
+    }
+    
+    res = await supabase_request("POST", "expenses", data=data)
+    return {
+        "status": "success",
+        "message": f"Added expense for user: {user_id}",
+        "data": res
+    }
+
+# -----------------------
+# LIST EXPENSES
+# -----------------------
+@mcp.tool()
+async def list_expenses(token: str, start_date: str, end_date: str):
+    """
+    List expenses for a specific period.
+    Requires a valid secret 'token' for authentication.
+    """
+    user_id = get_user_id(token)
+    
+    params = {
+        "user_id": f"eq.{user_id}",
+        "date": f"and(gte.{start_date},lte.{end_date})",
+        "order": "id.asc"
+    }
+    
+    return await supabase_request("GET", "expenses", params=params)
+
+# -----------------------
+# SUMMARY + GRAPH
+# -----------------------
+@mcp.tool()
+async def summarize(token: str, start_date: str, end_date: str):
+    """
+    Get a spending summary and graph.
+    Requires a valid secret 'token' for authentication.
+    """
+    user_id = get_user_id(token)
+    
+    params = {
+        "user_id": f"eq.{user_id}",
+        "date": f"and(gte.{start_date},lte.{end_date})",
+        "select": "category,amount"
+    }
+    
+    rows = await supabase_request("GET", "expenses", params=params)
+
+    if not rows:
+        return "No expenses found for this period."
+
+    # -----------------------
+    # PROCESS DATA
+    # -----------------------
+    summary = {}
+    for r in rows:
+        summary[r["category"]] = summary.get(r["category"], 0) + r["amount"]
+
+    total_amount = sum(summary.values())
+
+    # -----------------------
+    # ADVICE
+    # -----------------------
+    advice = f"### 📊 Expense Summary (User: {user_id})\n"
+    advice += f"**Total Spending: ₹{total_amount:.2f}**\n\n"
+
+    for cat, amt in summary.items():
+        pct = (amt / total_amount * 100) if total_amount else 0
+        advice += f"- {cat}: ₹{amt:.2f} ({pct:.1f}%)\n"
+
+    # -----------------------
+    # GRAPH (DONUT STYLE)
+    # -----------------------
+    NAVY_BG = "#020617"
+    CYAN = "#38bdf8"
+    INDIGO = "#6366f1"
+    TEXT_GRAY = "#cbd5e1"
+
+    categories = list(summary.keys())
+    amounts = list(summary.values())
+
+    plt.figure(figsize=(8, 8), facecolor=NAVY_BG)
+    ax = plt.gca()
+    ax.set_facecolor(NAVY_BG)
+
+    colors = [CYAN, INDIGO, "#4f46e5", "#1e293b", "#334155", "#475569"]
+
+    wedges, texts, autotexts = plt.pie(
+        amounts,
+        labels=categories,
+        autopct='%1.1f%%',
+        startangle=140,
+        colors=colors,
+        pctdistance=0.85,
+        wedgeprops=dict(width=0.4, edgecolor=NAVY_BG)
+    )
+
+    plt.setp(autotexts, size=11, weight="bold", color=NAVY_BG)
+    plt.setp(texts, size=13, weight="bold", color=TEXT_GRAY)
+
+    plt.title("Expense Summary", fontsize=18, fontweight='bold', color=CYAN)
+
+    buf = io.BytesIO()
+    plt.savefig(buf, format='png', bbox_inches='tight', dpi=120)
+    plt.close()
+    buf.seek(0)
+
+    image_base64 = base64.b64encode(buf.read()).decode('utf-8')
+
+    return [
+        types.TextContent(type="text", text=advice),
+        types.ImageContent(type="image", data=image_base64, mimeType="image/png")
+    ]
 
 
-@server.tool()
-async def summarize(start_date: str, end_date: str, category: str | None = None):
-    """Summarize expenses."""
-    try:
-        ensure_db()
-
-        async with aiosqlite.connect(DB_PATH, timeout=10) as db:
-            db.row_factory = aiosqlite.Row
-
-            query = """
-                SELECT category, SUM(amount) as total, COUNT(*) as count
-                FROM expenses
-                WHERE date BETWEEN ? AND ?
-            """
-            params = [start_date, end_date]
-
-            if category:
-                query += " AND category = ?"
-                params.append(category)
-
-            query += " GROUP BY category ORDER BY total DESC"
-
-            cursor = await db.execute(query, params)
-            rows = await cursor.fetchall()
-
-            if not rows:
-                return {"content": ["No expenses found."]}
-
-            return {
-                "content": [
-                    f"{row['category']} → ₹{row['total']} ({row['count']} entries)"
-                    for row in rows
-                ]
-            }
-
-    except Exception as e:
-        return {"content": [f"Error: {str(e)}"]}
-
-# ==============================
-# RESOURCE
-# ==============================
-
-@server.resource("expense:///categories", mime_type="application/json")
+# -----------------------
+# CATEGORIES RESOURCE
+# -----------------------
+@mcp.resource("expense:///categories", mime_type="application/json")
 def categories():
-    default_categories = {
+    return {
         "categories": [
-            "Food & Dining",
-            "Transportation",
+            "Food",
+            "Transport",
             "Shopping",
-            "Entertainment",
-            "Bills & Utilities",
-            "Healthcare",
-            "Travel",
             "Education",
-            "Business",
+            "Bills",
+            "Health",
             "Other"
         ]
     }
 
-    try:
-        if os.path.exists(CATEGORIES_PATH):
-            with open(CATEGORIES_PATH, "r", encoding="utf-8") as f:
-                return f.read()
-        else:
-            return json.dumps(default_categories, indent=2)
-
-    except Exception as e:
-        return json.dumps({"error": str(e)})
-
-# ==============================
+# -----------------------
 # RUN SERVER
-# ==============================
+# -----------------------
 if __name__ == "__main__":
-    print("🚀 Starting MCP Expense Tracker Server...")
-    ensure_db()
-
-    server.run(
-        transport="http",
-        host="0.0.0.0",
-        port=8000
-    )
+    # Use SSE transport to avoid stdout pollution and for better browser inspector support
+    mcp.run(transport="sse")

@@ -6,7 +6,8 @@ import os
 
 # Your actual live URL
 BASE_URL = "https://expense-track-remote-server.onrender.com"
-URL = f"{BASE_URL}/sse?token=my-secret-key-123"
+SECRET_TOKEN = "my-secret-key-123"
+URL = f"{BASE_URL}/sse?token={SECRET_TOKEN}"
 
 async def stdio_to_sse(client, post_url):
     """Read from stdin (Claude) and POST to the server."""
@@ -17,9 +18,18 @@ async def stdio_to_sse(client, post_url):
             break
         try:
             payload = json.loads(line)
+            # PRO FIX: Auto-inject the secret token so you don't have to type it!
+            if payload.get("method") == "tools/call":
+                params = payload.get("params", {})
+                args = params.get("arguments", {})
+                args["token"] = SECRET_TOKEN
+                params["arguments"] = args
+                payload["params"] = params
+            
             await client.post(post_url, json=payload)
         except Exception as e:
             print(f"Post Error: {e}", file=sys.stderr)
+
 
 async def main():
     headers = {"Accept": "text/event-stream"}

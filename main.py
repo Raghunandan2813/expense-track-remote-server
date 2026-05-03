@@ -33,44 +33,33 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 # -----------------------
 
 async def get_user_id(token: str) -> str:
-    """Validates the token against the Supabase database and returns the user_id."""
+    """
+    Validates the token. 
+    If the token is new, it automatically registers it as a new user (Zero Touch).
+    """
     params = {"token": f"eq.{token}", "select": "user_id"}
     res = await supabase_request("GET", "user_tokens", params=params)
     
-    if not res:
-        raise Exception("Unauthorized: Invalid or missing token.")
-    
-    return res[0]["user_id"]
-
-@mcp.tool()
-async def register_user(admin_secret: str, user_id_to_create: str):
-    """
-    Generate a new secret token for a user.
-    Requires your SUPABASE_KEY (or a custom admin secret) to prevent unauthorized registrations.
-    """
-    # Simple security check to make sure only YOU can register users
-    if admin_secret != SUPABASE_KEY:
-         raise Exception("Unauthorized: Admin secret is incorrect.")
-
-    # Generate a secure random token
-    new_token = secrets.token_urlsafe(24)
-    
-    data = {
-        "token": new_token,
-        "user_id": user_id_to_create
-    }
-    
-    await supabase_request("POST", "user_tokens", data=data)
-    
-    return {
-        "status": "success",
-        "message": f"User '{user_id_to_create}' registered successfully.",
-        "token": new_token,
-        "instruction": "Send this token to the user. They must use it for all tool calls."
-    }
+    if res:
+        # User already exists
+        return res[0]["user_id"]
+    else:
+        # NEW USER: Automatically register them on the fly!
+        # We use the token itself (or a portion of it) as their user_id
+        new_user_id = f"auto_{token[:10]}" 
+        
+        data = {
+            "token": token,
+            "user_id": new_user_id
+        }
+        await supabase_request("POST", "user_tokens", data=data)
+        return new_user_id
 
 
-# Helper for direct HTTP calls (more robust than the library in some environments)
+# -----------------------
+# SUPABASE REQUEST HANDLER
+# -----------------------
+
 async def supabase_request(method: str, table: str, params: dict = None, data: dict = None):
     if not SUPABASE_URL or not SUPABASE_KEY:
         raise Exception("Configuration Error: Missing SUPABASE_URL or SUPABASE_KEY environment variables.")

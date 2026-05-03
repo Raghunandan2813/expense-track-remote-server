@@ -140,11 +140,13 @@ async def list_expenses(token: str, start_date: str, end_date: str):
     """
     user_id = await get_user_id(token)
     
-    params = {
-        "user_id": f"eq.{user_id}",
-        "date": f"and(gte.{start_date},lte.{end_date})",
-        "order": "id.asc"
-    }
+    # Use a list of tuples for params to allow multiple 'date' filters
+    params = [
+        ("user_id", f"eq.{user_id}"),
+        ("date", f"gte.{start_date}"),
+        ("date", f"lte.{end_date}"),
+        ("order", "id.asc")
+    ]
     
     return await supabase_request("GET", "expenses", params=params)
 
@@ -159,11 +161,13 @@ async def summarize(token: str, start_date: str, end_date: str):
     """
     user_id = await get_user_id(token)
     
-    params = {
-        "user_id": f"eq.{user_id}",
-        "date": f"and(gte.{start_date},lte.{end_date})",
-        "select": "category,amount"
-    }
+    params = [
+        ("user_id", f"eq.{user_id}"),
+        ("date", f"gte.{start_date}"),
+        ("date", f"lte.{end_date}"),
+        ("select", "category,amount")
+    ]
+
     
     rows = await supabase_request("GET", "expenses", params=params)
 

@@ -6,6 +6,7 @@ import base64
 from dotenv import load_dotenv
 import httpx
 import json
+import secrets
 
 # Load environment variables from .env file
 load_dotenv()
@@ -28,22 +29,46 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 
 
 # -----------------------
-# USER AUTH CONFIG
+# USER AUTH & REGISTRATION
 # -----------------------
-# Map of secret tokens to user_ids. 
-# You can add more users here or move this to a database/env file.
-USER_MAP = {
-    "secret-raghu-123": "user_raghu",
-    "secret-friend-456": "user_friend",
-    "test-token": "test_user_01"
-}
 
-def get_user_id(token: str) -> str:
-    """Validates the token and returns the corresponding user_id."""
-    user_id = USER_MAP.get(token)
-    if not user_id:
+async def get_user_id(token: str) -> str:
+    """Validates the token against the Supabase database and returns the user_id."""
+    params = {"token": f"eq.{token}", "select": "user_id"}
+    res = await supabase_request("GET", "user_tokens", params=params)
+    
+    if not res:
         raise Exception("Unauthorized: Invalid or missing token.")
-    return user_id
+    
+    return res[0]["user_id"]
+
+@mcp.tool()
+async def register_user(admin_secret: str, user_id_to_create: str):
+    """
+    Generate a new secret token for a user.
+    Requires your SUPABASE_KEY (or a custom admin secret) to prevent unauthorized registrations.
+    """
+    # Simple security check to make sure only YOU can register users
+    if admin_secret != SUPABASE_KEY:
+         raise Exception("Unauthorized: Admin secret is incorrect.")
+
+    # Generate a secure random token
+    new_token = secrets.token_urlsafe(24)
+    
+    data = {
+        "token": new_token,
+        "user_id": user_id_to_create
+    }
+    
+    await supabase_request("POST", "user_tokens", data=data)
+    
+    return {
+        "status": "success",
+        "message": f"User '{user_id_to_create}' registered successfully.",
+        "token": new_token,
+        "instruction": "Send this token to the user. They must use it for all tool calls."
+    }
+
 
 # Helper for direct HTTP calls (more robust than the library in some environments)
 async def supabase_request(method: str, table: str, params: dict = None, data: dict = None):
@@ -97,7 +122,7 @@ async def add_expense(
     Add a new expense. 
     Requires a valid secret 'token' for authentication.
     """
-    user_id = get_user_id(token)
+    user_id = await get_user_id(token)
     
     data = {
         "user_id": user_id,
@@ -124,7 +149,7 @@ async def list_expenses(token: str, start_date: str, end_date: str):
     List expenses for a specific period.
     Requires a valid secret 'token' for authentication.
     """
-    user_id = get_user_id(token)
+    user_id = await get_user_id(token)
     
     params = {
         "user_id": f"eq.{user_id}",
@@ -143,7 +168,7 @@ async def summarize(token: str, start_date: str, end_date: str):
     Get a spending summary and graph.
     Requires a valid secret 'token' for authentication.
     """
-    user_id = get_user_id(token)
+    user_id = await get_user_id(token)
     
     params = {
         "user_id": f"eq.{user_id}",

@@ -4,9 +4,7 @@ import os
 import io
 import base64
 from dotenv import load_dotenv
-import httpx
-import json
-import secrets
+import sqlite3
 
 # Load environment variables from .env file
 load_dotenv()
@@ -15,18 +13,50 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
+# Get the absolute path to the directory where main.py is located
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+DB_PATH = os.path.join(BASE_DIR, "expenses.db")
 
-# -----------------------
-# SUPABASE CONFIG
-# -----------------------
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").rstrip("/")
-# Ensure the URL is just the base (e.g., https://xyz.supabase.co)
-if "/rest/v1" in SUPABASE_URL:
-    SUPABASE_URL = SUPABASE_URL.split("/rest/v1")[0]
+def get_db():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    return conn
 
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+def init_db():
+    conn = get_db()
+    cursor = conn.cursor()
+    
+    # Create user_tokens if not exists
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS user_tokens (
+            token TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL
+        )
+    """)
+    
+    # Create expenses if not exists
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS expenses(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            date TEXT NOT NULL,
+            amount REAL NOT NULL,
+            category TEXT NOT NULL,
+            subcategory TEXT DEFAULT '',
+            note TEXT DEFAULT ''
+        )
+    """)
+    
+    # Add user_id to expenses if missing
+    cursor.execute("PRAGMA table_info(expenses)")
+    columns = [info['name'] for info in cursor.fetchall()]
+    if "user_id" not in columns:
+        cursor.execute("ALTER TABLE expenses ADD COLUMN user_id TEXT")
+        
+    conn.commit()
+    conn.close()
 
-
+# Initialize the database and schemas on startup
+init_db()
 
 # -----------------------
 # USER AUTH & REGISTRATION
@@ -37,58 +67,24 @@ async def get_user_id(token: str) -> str:
     Validates the token. 
     If the token is new, it automatically registers it as a new user (Zero Touch).
     """
-    params = {"token": f"eq.{token}", "select": "user_id"}
-    res = await supabase_request("GET", "user_tokens", params=params)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("SELECT user_id FROM user_tokens WHERE token = ?", (token,))
+    row = cursor.fetchone()
     
-    if res:
+    if row:
         # User already exists
-        return res[0]["user_id"]
+        conn.close()
+        return row["user_id"]
     else:
         # NEW USER: Automatically register them on the fly!
         # We use the token itself (or a portion of it) as their user_id
         new_user_id = f"auto_{token[:10]}" 
         
-        data = {
-            "token": token,
-            "user_id": new_user_id
-        }
-        await supabase_request("POST", "user_tokens", data=data)
+        cursor.execute("INSERT INTO user_tokens (token, user_id) VALUES (?, ?)", (token, new_user_id))
+        conn.commit()
+        conn.close()
         return new_user_id
-
-
-# -----------------------
-# SUPABASE REQUEST HANDLER
-# -----------------------
-
-async def supabase_request(method: str, table: str, params: dict = None, data: dict = None):
-    if not SUPABASE_URL or not SUPABASE_KEY:
-        raise Exception("Configuration Error: Missing SUPABASE_URL or SUPABASE_KEY environment variables.")
-        
-    url = f"{SUPABASE_URL}/rest/v1/{table}"
-
-    headers = {
-        "apikey": SUPABASE_KEY,
-        "Authorization": f"Bearer {SUPABASE_KEY}",
-        "Content-Type": "application/json",
-        "Prefer": "return=representation"
-    }
-    
-    async with httpx.AsyncClient() as client:
-        if method.upper() == "POST":
-            resp = await client.post(url, headers=headers, json=data)
-        elif method.upper() == "GET":
-            resp = await client.get(url, headers=headers, params=params)
-        else:
-            raise ValueError(f"Unsupported method: {method}")
-        
-        if resp.status_code >= 400:
-            try:
-                err_data = resp.json()
-            except:
-                err_data = resp.text
-            raise Exception(f"Supabase Error ({resp.status_code}): {err_data}")
-            
-        return resp.json()
 
 # -----------------------
 # MCP INIT
@@ -113,20 +109,23 @@ async def add_expense(
     """
     user_id = await get_user_id(token)
     
-    data = {
-        "user_id": user_id,
-        "date": date,
-        "amount": amount,
-        "category": category,
-        "subcategory": subcategory,
-        "note": note
-    }
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        INSERT INTO expenses (user_id, date, amount, category, subcategory, note)
+        VALUES (?, ?, ?, ?, ?, ?)
+    """, (user_id, date, amount, category, subcategory, note))
+    conn.commit()
     
-    res = await supabase_request("POST", "expenses", data=data)
+    # Fetch inserted row to return it
+    cursor.execute("SELECT * FROM expenses WHERE id = ?", (cursor.lastrowid,))
+    inserted_row = dict(cursor.fetchone())
+    conn.close()
+    
     return {
         "status": "success",
         "message": f"Added expense for user: {user_id}",
-        "data": res
+        "data": [inserted_row]
     }
 
 # -----------------------
@@ -140,15 +139,17 @@ async def list_expenses(start_date: str, end_date: str, token: str = ""):
     """
     user_id = await get_user_id(token)
     
-    # Use a list of tuples for params to allow multiple 'date' filters
-    params = [
-        ("user_id", f"eq.{user_id}"),
-        ("date", f"gte.{start_date}"),
-        ("date", f"lte.{end_date}"),
-        ("order", "id.asc")
-    ]
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT * FROM expenses 
+        WHERE user_id = ? AND date >= ? AND date <= ?
+        ORDER BY id ASC
+    """, (user_id, start_date, end_date))
+    rows = cursor.fetchall()
+    conn.close()
     
-    return await supabase_request("GET", "expenses", params=params)
+    return [dict(row) for row in rows]
 
 # -----------------------
 # SUMMARY + GRAPH
@@ -161,15 +162,14 @@ async def summarize(start_date: str, end_date: str, token: str = ""):
     """
     user_id = await get_user_id(token)
     
-    params = [
-        ("user_id", f"eq.{user_id}"),
-        ("date", f"gte.{start_date}"),
-        ("date", f"lte.{end_date}"),
-        ("select", "category,amount")
-    ]
-
-    
-    rows = await supabase_request("GET", "expenses", params=params)
+    conn = get_db()
+    cursor = conn.cursor()
+    cursor.execute("""
+        SELECT category, amount FROM expenses 
+        WHERE user_id = ? AND date >= ? AND date <= ?
+    """, (user_id, start_date, end_date))
+    rows = cursor.fetchall()
+    conn.close()
 
     if not rows:
         return "No expenses found for this period."
@@ -259,8 +259,8 @@ def categories():
 # RUN SERVER
 # -----------------------
 if __name__ == "__main__":
-    import os
     # Render and other cloud hosts provide a PORT environment variable
+    # We still use this as a fallback even if running locally.
     port = int(os.getenv("PORT", 8000))
-    # Use host="0.0.0.0" so the server is accessible from the internet
+    # Use host="0.0.0.0" so the server is accessible from the internet/local network
     mcp.run(transport="sse", host="0.0.0.0", port=port)
